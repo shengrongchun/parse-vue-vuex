@@ -22,7 +22,7 @@ export default function (Vue) {
   function vuexInit() {//这样在整个项目的this实例中都可以获取到$store
     const options = this.$options
     // store injection
-    if (options.store) {//此时的this是根节点
+    if (options.store) {//此时的this是根实例
       this.$store = typeof options.store === 'function'
         ? options.store()
         : options.store

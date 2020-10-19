@@ -1,6 +1,9 @@
 import { Store, install } from './store'
+import { mapState } from './helpers'
 
 export default {
   Store,
-  install
+  install,
+  version: '__VERSION__',
+  mapState
 }
