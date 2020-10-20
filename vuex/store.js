@@ -186,7 +186,7 @@ export class Store { // this--> vue实例中的 this.$store
     const subs = typeof fn === 'function' ? { before: fn } : fn
     return genericSubscribe(subs, this._actionSubscribers, options)
   }
-
+  //响应式地侦听 fn 的返回值，当值改变时调用回调函数
   watch(getter, cb, options) {
     if (__DEV__) {
       assert(typeof getter === 'function', `store.watch only accepts a function.`)
@@ -199,6 +199,50 @@ export class Store { // this--> vue实例中的 this.$store
       this._vm._data.$$state = state
     })
   }
+  //注册一个动态模块，有时候我们想加一个模块，此模块配置文件中没有定义，所以可以注册一个动态的模块
+  registerModule(path, rawModule, options = {}) {
+    if (typeof path === 'string') path = [path]
+
+    if (__DEV__) {
+      assert(Array.isArray(path), `module path must be a string or an Array.`)
+      assert(path.length > 0, 'cannot register the root module by using registerModule.')
+    }
+
+    this._modules.register(path, rawModule)
+    installModule(this, this.state, path, this._modules.get(path), options.preserveState)
+    // reset store to update getters...
+    resetStoreVM(this, this.state)
+  }
+  //卸载一个动态模块
+  unregisterModule(path) {
+    if (typeof path === 'string') path = [path]
+
+    if (__DEV__) {
+      assert(Array.isArray(path), `module path must be a string or an Array.`)
+    }
+
+    this._modules.unregister(path)
+    this._withCommit(() => {
+      const parentState = getNestedState(this.state, path.slice(0, -1))
+      Vue.delete(parentState, path[path.length - 1])
+    })
+    resetStore(this)
+  }
+  //检查该模块的名字是否已经被注册
+  hasModule(path) {
+    if (typeof path === 'string') path = [path]
+
+    if (__DEV__) {
+      assert(Array.isArray(path), `module path must be a string or an Array.`)
+    }
+    return this._modules.isRegistered(path)
+  }
+  //热替换新的 action 和 mutation
+  hotUpdate(newOptions) {
+    this._modules.update(newOptions)
+    resetStore(this, true)
+  }
+
   //即使state在mutation以外改变也不发生警告
   _withCommit(fn) {
     const committing = this._committing
@@ -220,6 +264,17 @@ function genericSubscribe(fn, subs, options) {
       subs.splice(i, 1)
     }
   }
+}
+function resetStore(store, hot) {
+  store._actions = Object.create(null)
+  store._mutations = Object.create(null)
+  store._wrappedGetters = Object.create(null)
+  store._modulesNamespaceMap = Object.create(null)
+  const state = store.state
+  // init all modules
+  installModule(store, state, [], store._modules.root, true)
+  // reset vm
+  resetStoreVM(store, state, hot)
 }
 //ok
 function resetStoreVM(store, state, hot) {

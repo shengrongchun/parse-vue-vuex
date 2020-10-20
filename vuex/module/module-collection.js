@@ -47,6 +47,7 @@ export default class ModuleCollection {
       })
     }
   }
+  //卸载模块
   unregister(path) {
     const parent = this.get(path.slice(0, -1))
     const key = path[path.length - 1]
@@ -68,7 +69,7 @@ export default class ModuleCollection {
 
     parent.removeChild(key)
   }
-
+  //是否是已经注册过的模块
   isRegistered(path) {
     const parent = this.get(path.slice(0, -1))
     const key = path[path.length - 1]
