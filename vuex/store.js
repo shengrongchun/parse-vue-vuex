@@ -25,11 +25,25 @@ export class Store { // this--> vue实例中的 this.$store
     // store internal state
     this._committing = false //state改变是否触发警告标识(严格模式下在mutations以外处修改state会触发警告)
     this._actions = Object.create(null) //存储定义的所有actions
+    this._actionSubscribers = [] //订阅action的回调函数，当有action执行后，会执行此数组中的函数
     this._mutations = Object.create(null)//存储定义的所有mutations
     this._wrappedGetters = Object.create(null)//存储所有模块的getters
     this._modules = new ModuleCollection(options) //收集配置文件中定义的模块，并且返回树状模块数据结构
     this._modulesNamespaceMap = Object.create(null) //命名空间与模块映射
+    this._subscribers = [] //订阅mutation的回调函数，当有mutation执行后，会执行此数组中的函数
+    this._watcherVM = new Vue()//vue实例
     this._makeLocalGettersCache = Object.create(null)//存储非根模块getters
+
+    // bind commit and dispatch to self
+    const store = this //this.$store 实例
+    const { dispatch, commit } = this
+    //中转下是保证方法里的this是store
+    this.dispatch = function boundDispatch(type, payload) {
+      return dispatch.call(store, type, payload) // this.$store.dispatch
+    }
+    this.commit = function boundCommit(type, payload, options) {
+      return commit.call(store, type, payload, options) // this.$store.commit
+    }
 
     // strict mode 在严格模式下，任何 mutation 处理函数以外修改 Vuex state 都会抛出错误
     this.strict = strict
@@ -52,6 +66,175 @@ export class Store { // this--> vue实例中的 this.$store
       devtoolPlugin(this)
     }
   }
+  //实例方法
+  get state() {// store.state --> 根实例的state
+    return this._vm._data.$$state
+  }
+
+  set state(v) {
+    if (__DEV__) {
+      assert(false, `use store.replaceState() to explicit replace store state.`)
+    }
+  }
+  commit(_type, _payload, _options) {
+    // check object-style commit
+    const {
+      type,
+      payload,
+      options
+    } = unifyObjectStyle(_type, _payload, _options)
+
+    const mutation = { type, payload }
+    const entry = this._mutations[type]
+    if (!entry) {
+      if (__DEV__) {
+        console.error(`[vuex] unknown mutation type: ${type}`)
+      }
+      return
+    }
+    //_withCommit很重要，作用是fn里面改变state,不会触发警告
+    this._withCommit(() => {
+      entry.forEach(function commitIterator(handler) {
+        handler(payload)
+      })
+    })
+    //mutation执行完后，执行订阅的回调函数
+    this._subscribers
+      .slice() // shallow copy to prevent iterator invalidation if subscriber synchronously calls unsubscribe
+      .forEach(sub => sub(mutation, this.state))
+
+    if (
+      __DEV__ &&
+      options && options.silent
+    ) {
+      console.warn(
+        `[vuex] mutation type: ${type}. Silent option has been removed. ` +
+        'Use the filter functionality in the vue-devtools'
+      )
+    }
+  }
+  dispatch(_type, _payload) {
+    // check object-style dispatch
+    const {
+      type,
+      payload
+    } = unifyObjectStyle(_type, _payload)
+
+    const action = { type, payload }
+    const entry = this._actions[type]
+    if (!entry) {
+      if (__DEV__) {
+        console.error(`[vuex] unknown action type: ${type}`)
+      }
+      return
+    }
+
+    try {//如果有before说明是希望在action分发之前调用
+      this._actionSubscribers
+        .slice() // shallow copy to prevent iterator invalidation if subscriber synchronously calls unsubscribe
+        .filter(sub => sub.before)
+        .forEach(sub => sub.before(action, this.state))
+    } catch (e) {
+      if (__DEV__) {
+        console.warn(`[vuex] error in before action subscribers: `)
+        console.error(e)
+      }
+    }
+
+    const result = entry.length > 1
+      ? Promise.all(entry.map(handler => handler(payload)))
+      : entry[0](payload)
+
+    return new Promise((resolve, reject) => {
+      result.then(res => {
+        try {
+          this._actionSubscribers//分发之后调用
+            .filter(sub => sub.after)
+            .forEach(sub => sub.after(action, this.state))
+        } catch (e) {
+          if (__DEV__) {
+            console.warn(`[vuex] error in after action subscribers: `)
+            console.error(e)
+          }
+        }
+        resolve(res)
+      }, error => {
+        try {
+          this._actionSubscribers
+            .filter(sub => sub.error)
+            .forEach(sub => sub.error(action, this.state, error))
+        } catch (e) {
+          if (__DEV__) {
+            console.warn(`[vuex] error in error action subscribers: `)
+            console.error(e)
+          }
+        }
+        reject(error)
+      })
+    })
+  }
+  subscribe(fn, options) {//订阅mutation,就是在this._subscribers装入此fn
+    return genericSubscribe(fn, this._subscribers, options)
+  }
+  subscribeAction(fn, options) {//订阅action
+    const subs = typeof fn === 'function' ? { before: fn } : fn
+    return genericSubscribe(subs, this._actionSubscribers, options)
+  }
+  //响应式地侦听 fn 的返回值，当值改变时调用回调函数
+  watch(getter, cb, options) {
+    if (__DEV__) {
+      assert(typeof getter === 'function', `store.watch only accepts a function.`)
+    }
+    return this._watcherVM.$watch(() => getter(this.state, this.getters), cb, options)
+  }
+  replaceState(state) {//时光旅行，他可能会返回之前某个时间点的state,然后赋值此state,达到当前展示之前某个时间的快照
+    this._withCommit(() => {
+      this._vm._data.$$state = state
+    })
+  }
+  //注册一个动态模块，有时候我们想加一个模块，此模块配置文件中没有定义，所以可以注册一个动态的模块
+  registerModule(path, rawModule, options = {}) {
+    if (typeof path === 'string') path = [path]
+
+    if (__DEV__) {
+      assert(Array.isArray(path), `module path must be a string or an Array.`)
+      assert(path.length > 0, 'cannot register the root module by using registerModule.')
+    }
+
+    this._modules.register(path, rawModule)
+    installModule(this, this.state, path, this._modules.get(path), options.preserveState)
+    // reset store to update getters...
+    resetStoreVM(this, this.state)
+  }
+  //卸载一个动态模块
+  unregisterModule(path) {
+    if (typeof path === 'string') path = [path]
+
+    if (__DEV__) {
+      assert(Array.isArray(path), `module path must be a string or an Array.`)
+    }
+
+    this._modules.unregister(path)
+    this._withCommit(() => {
+      const parentState = getNestedState(this.state, path.slice(0, -1))
+      Vue.delete(parentState, path[path.length - 1])
+    })
+    resetStore(this)
+  }
+  //检查该模块的名字是否已经被注册
+  hasModule(path) {
+    if (typeof path === 'string') path = [path]
+
+    if (__DEV__) {
+      assert(Array.isArray(path), `module path must be a string or an Array.`)
+    }
+    return this._modules.isRegistered(path)
+  }
+  //热替换新的 action 和 mutation
+  hotUpdate(newOptions) {
+    this._modules.update(newOptions)
+    resetStore(this, true)
+  }
 
   //即使state在mutation以外改变也不发生警告
   _withCommit(fn) {
@@ -62,7 +245,31 @@ export class Store { // this--> vue实例中的 this.$store
   }
 }
 
-
+//执行订阅装入操作
+function genericSubscribe(fn, subs, options) {
+  if (subs.indexOf(fn) < 0) {
+    options && options.prepend
+      ? subs.unshift(fn)
+      : subs.push(fn)
+  }
+  return () => {//返回函数，直接执行是停止订阅
+    const i = subs.indexOf(fn)
+    if (i > -1) {
+      subs.splice(i, 1)
+    }
+  }
+}
+function resetStore(store, hot) {
+  store._actions = Object.create(null)
+  store._mutations = Object.create(null)
+  store._wrappedGetters = Object.create(null)
+  store._modulesNamespaceMap = Object.create(null)
+  const state = store.state
+  // init all modules
+  installModule(store, state, [], store._modules.root, true)
+  // reset vm
+  resetStoreVM(store, state, hot)
+}
 function resetStoreVM(store, state, hot) {
   const oldVm = store._vm
 

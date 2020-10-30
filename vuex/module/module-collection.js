@@ -21,6 +21,11 @@ export default class ModuleCollection {
       return namespace + (module.namespaced ? key + '/' : '')
     }, '')
   }
+
+  update(rawRootModule) {
+    update([], this.root, rawRootModule)
+  }
+
   //注册收集模块，父模块把所有子模块收集到自己的__children里面
   register(path, rawModule, runtime = true) {
     if (__DEV__) {//dev环境下判断当前模块下actions,mutations,getters里面定义的类型是否正确，不正确发出警告
@@ -42,8 +47,64 @@ export default class ModuleCollection {
       })
     }
   }
-}
+  //卸载模块
+  unregister(path) {
+    const parent = this.get(path.slice(0, -1))
+    const key = path[path.length - 1]
+    const child = parent.getChild(key)
 
+    if (!child) {
+      if (__DEV__) {
+        console.warn(
+          `[vuex] trying to unregister module '${key}', which is ` +
+          `not registered`
+        )
+      }
+      return
+    }
+
+    if (!child.runtime) {
+      return
+    }
+
+    parent.removeChild(key)
+  }
+  //是否是已经注册过的模块
+  isRegistered(path) {
+    const parent = this.get(path.slice(0, -1))
+    const key = path[path.length - 1]
+
+    return parent.hasChild(key)
+  }
+}
+function update(path, targetModule, newModule) {
+  if (__DEV__) {
+    assertRawModule(path, newModule)
+  }
+
+  // update target module
+  targetModule.update(newModule)
+
+  // update nested modules
+  if (newModule.modules) {
+    for (const key in newModule.modules) {
+      if (!targetModule.getChild(key)) {
+        if (__DEV__) {
+          console.warn(
+            `[vuex] trying to add a new module '${key}' on hot reloading, ` +
+            'manual reload is needed'
+          )
+        }
+        return
+      }
+      update(
+        path.concat(key),
+        targetModule.getChild(key),
+        newModule.modules[key]
+      )
+    }
+  }
+}
 
 //从Assert可以得出：mutations和getters里面定义的只能是函数，而actions可以是函数或者含有handler函数的对象
 //assertRawModule作用就是判断模块中定义的类型是否正确，在dev环境下会警告
