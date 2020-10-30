@@ -7,6 +7,7 @@ Vue.config.productionTip = false
 Vue.use(vuex)
 //
 const store = new vuex.Store({
+  strict: true,
   state: {},
   mutations: {},
   actions: {},

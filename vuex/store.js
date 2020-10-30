@@ -1,6 +1,7 @@
 import applyMixin from './mixin'
+import devtoolPlugin from './plugins/devtool'
 import ModuleCollection from './module/module-collection'
-import { assert, isObject, isPromise } from './util'
+import { forEachValue, assert, isObject, isPromise, partial } from './util'
 
 let Vue // bind on install
 export class Store { // this--> vue实例中的 this.$store
@@ -17,19 +18,39 @@ export class Store { // this--> vue实例中的 this.$store
       assert(typeof Promise !== 'undefined', `vuex requires a Promise polyfill in this browser.`)
       assert(this instanceof Store, `store must be called with the new operator.`)
     }
-    //
+    const {
+      plugins = [],//用户定义插件
+      strict = false// 用户定义是否严格模式，在严格模式下，任何 mutation 处理函数以外修改 Vuex state 都会抛出错误
+    } = options
+    // store internal state
+    this._committing = false //state改变是否触发警告标识(严格模式下在mutations以外处修改state会触发警告)
     this._actions = Object.create(null) //存储定义的所有actions
     this._mutations = Object.create(null)//存储定义的所有mutations
     this._wrappedGetters = Object.create(null)//存储所有模块的getters
     this._modules = new ModuleCollection(options) //收集配置文件中定义的模块，并且返回树状模块数据结构
     this._modulesNamespaceMap = Object.create(null) //命名空间与模块映射
     this._makeLocalGettersCache = Object.create(null)//存储非根模块getters
-    //
+
+    // strict mode 在严格模式下，任何 mutation 处理函数以外修改 Vuex state 都会抛出错误
+    this.strict = strict
+
     const state = this._modules.root.state //根实例的state 此时还未是响应式的
     // init root module.
     // this also recursively registers all sub-modules 递归
     // and collects all module getters inside this._wrappedGetters
     installModule(this, state, [], this._modules.root)
+
+    // initialize the store vm, which is responsible for the reactivity
+    // (also registers _wrappedGetters as computed properties)
+    resetStoreVM(this, state)
+
+    // apply plugins
+    plugins.forEach(plugin => plugin(this))
+
+    const useDevtools = options.devtools !== undefined ? options.devtools : Vue.config.devtools
+    if (useDevtools) {
+      devtoolPlugin(this)
+    }
   }
 
   //即使state在mutation以外改变也不发生警告
@@ -42,7 +63,56 @@ export class Store { // this--> vue实例中的 this.$store
 }
 
 
-//ok
+function resetStoreVM(store, state, hot) {
+  const oldVm = store._vm
+
+  // bind store public getters
+  store.getters = {}
+  // reset local getters cache
+  store._makeLocalGettersCache = Object.create(null)
+  const wrappedGetters = store._wrappedGetters
+  const computed = {}
+  forEachValue(wrappedGetters, (fn, key) => {
+    // use computed to leverage its lazy-caching mechanism
+    // direct inline function use will lead to closure preserving oldVm.
+    // using partial to return function with only arguments preserved in closure environment.
+    computed[key] = partial(fn, store)
+    Object.defineProperty(store.getters, key, {
+      get: () => store._vm[key],
+      enumerable: true // for local getters
+    })
+  })
+
+  // use a Vue instance to store the state tree
+  // suppress warnings just in case the user has added
+  // some funky global mixins
+  const silent = Vue.config.silent
+  Vue.config.silent = true
+  store._vm = new Vue({
+    data: {
+      $$state: state //state响应式
+    },
+    computed
+  })
+  Vue.config.silent = silent
+
+  // enable strict mode for new vm
+  if (store.strict) {
+    enableStrictMode(store)
+  }
+
+  if (oldVm) {//销毁
+    if (hot) {
+      // dispatch changes in all subscribed watchers
+      // to force getter re-evaluation for hot reloading.
+      store._withCommit(() => {
+        oldVm._data.$$state = null
+      })
+    }
+    Vue.nextTick(() => oldVm.$destroy())
+  }
+}
+//
 function installModule(store, rootState, path, module, hot) {
   const isRoot = !path.length //是否为根模块
   const namespace = store._modules.getNamespace(path)//获取模块对应的命名空间
@@ -232,6 +302,15 @@ function registerGetter(store, type, rawGetter, local) {
     )
   }
 }
+function enableStrictMode(store) {//监听 state 的变化
+  store._vm.$watch(function () { return this._data.$$state }, () => {
+    if (__DEV__) {
+      //当store._committing为false,并且 state变化了，才会警告
+      //所以当通过commit改变state的时候，_committing是为true的
+      assert(store._committing, `do not mutate vuex store state outside mutation handlers.`)
+    }
+  }, { deep: true, sync: true })
+}
 function getNestedState(state, path) {//通过path来获取对应模块的state
   return path.reduce((state, key) => state[key], state)
 }
@@ -248,12 +327,6 @@ function unifyObjectStyle(type, payload, options) {
 
   return { type, payload, options }
 }
-
-
-
-
-
-
 
 //
 export function install(_Vue) {//插件安装
